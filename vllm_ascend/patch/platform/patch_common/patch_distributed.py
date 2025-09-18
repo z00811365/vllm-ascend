@@ -17,14 +17,15 @@
 # Adapted from vllm/model_executor/models/qwen2_vl.py
 # This file is a part of the vllm-ascend project.
 
+import torch
 import vllm
 import vllm.envs as envs
-from torch.distributed import ProcessGroup
+from torch.distributed import ProcessGroup, ReduceOp
 from vllm.config import ParallelConfig
 from vllm.distributed.utils import \
     stateless_init_torch_distributed_process_group
 
-
+_DP_GROUP = None
 def ascend_destroy_model_parallel():
     """Set the groups to none and destroy them."""
     from vllm.distributed.parallel_state import _DP, _EP, _PP, _TP
@@ -75,9 +76,29 @@ def stateless_init_dp_group(self) -> "ProcessGroup":
         self.data_parallel_size,
         backend="gloo")
 
+    global _DP_GROUP
+    _DP_GROUP = dp_group
+
     return dp_group
+
+
+def get_dp_group():
+  return _DP_GROUP
+
+
+def ascend_has_unfinished_dp(dp_group: "ProcessGroup",
+                             has_unfinished: bool) -> bool:
+    tensor = torch.tensor([has_unfinished],
+                          dtype=torch.int32,
+                          device="npu")
+    # dp rank 0: has_unfinished_seqs=True
+    # dp rank 1: has_unfinished_seqs=False
+    # aggregated: has_unfinished_seqs=True
+    # so this is an OR operation, i.e. MAX in integers
+    torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
+    return aggregated_has_unfinished
 
 
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
-ParallelConfig.stateless_init_dp_group = stateless_init_dp_group
+ParallelConfig.stateless_init_dp_group = staticmethod(ascend_has_unfinished_dp)
